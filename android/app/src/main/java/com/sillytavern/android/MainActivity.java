@@ -72,7 +72,7 @@ public class MainActivity extends BridgeActivity {
     // SillyTavern is waiting on something: a reply, a summary, embeddings, image
     // or audio generation, or saving the chat. A streamed response counts until
     // its body has been fully read.
-    // Also forwards the finished reply to NotificationBridge on GENERATION_ENDED.
+    // Also forwards each finished character message to NotificationBridge.
     private static final String GENERATION_HOOK_JS =
             "(function(){" +
             "if(window.__stActivityHook)return;window.__stActivityHook=true;" +
@@ -98,13 +98,15 @@ public class MainActivity extends BridgeActivity {
             "var tries=0,t=setInterval(function(){" +
             "if(++tries>120){clearInterval(t);return;}" +
             "var ST=window.SillyTavern;if(!ST||!ST.getContext)return;" +
-            "var c=ST.getContext(),e=c.event_types;" +
-            "if(!c.eventSource||!e||!e.GENERATION_ENDED)return;" +
+            "var c=ST.getContext(),e=c.event_types||c.eventTypes;" +
+            "if(!c.eventSource||!e)return;" +
+            "var ev=e.CHARACTER_MESSAGE_RENDERED||e.GENERATION_ENDED;if(!ev)return;" +
             "clearInterval(t);" +
-            "c.eventSource.on(e.GENERATION_ENDED,function(){" +
+            "c.eventSource.on(ev,function(id,type){" +
             "try{" +
-            "var chat=ST.getContext().chat||[],m=chat[chat.length-1];" +
-            "if(m&&!m.is_user&&window.NotificationBridge)window.NotificationBridge.onReplyFinished(String(m.name||\"SillyTavern\"),String(m.mes||\"\"));" +
+            "if(type===\"first_message\")return;" +
+            "var chat=ST.getContext().chat||[],m=chat[typeof id===\"number\"&&chat[id]?id:chat.length-1];" +
+            "if(m&&!m.is_user&&!m.is_system&&window.NotificationBridge)window.NotificationBridge.onReplyFinished(String(m.name||\"SillyTavern\"),String(m.mes||\"\"));" +
             "}catch(err){}" +
             "});" +
             "},1000);" +
