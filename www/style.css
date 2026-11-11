@@ -14,8 +14,10 @@ body {
     color: var(--text-color);
     display: flex;
     justify-content: center;
-    align-items: center;
-    height: 100vh;
+    /* min-height (not height) and an auto-margin container instead of
+       align-items: center, so content taller than the screen (settings with the
+       keyboard open) scrolls from the top instead of being cut off above it. */
+    min-height: 100vh;
     user-select: none;
     box-sizing: border-box;
 }
@@ -24,6 +26,8 @@ body {
     width: 90%;
     max-width: 400px;
     text-align: center;
+    margin: auto;
+    padding: 1rem 0;
 }
 
 .hidden {
