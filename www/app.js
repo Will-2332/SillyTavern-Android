@@ -3,6 +3,7 @@ const AUTH_ENABLED_KEY = 'sillytavern_auth_enabled';
 const AUTH_USER_KEY = 'sillytavern_auth_user';
 const AUTH_PASS_KEY = 'sillytavern_auth_pass';
 const BG_MODE_KEY = 'sillytavern_bg_mode';
+const REPLY_NOTIFY_KEY = 'sillytavern_reply_notify';
 
 // Elements
 const mainScreen = document.getElementById('main-screen');
@@ -14,6 +15,7 @@ const authFields = document.getElementById('auth-fields');
 const authUser = document.getElementById('auth-user');
 const authPass = document.getElementById('auth-pass');
 const bgToggle = document.getElementById('bg-toggle');
+const notifyToggle = document.getElementById('notify-toggle');
 const batteryOptBtn = document.getElementById('battery-opt-btn');
 
 // Buttons
@@ -28,6 +30,7 @@ function init() {
     // Sync auth settings to native side on startup
     syncAuthToNative();
     syncBackgroundToNative();
+    syncNotificationsToNative();
 
     if (!storedUrl) {
         // First time open - set default and show settings
@@ -72,6 +75,7 @@ function showSettings() {
 
     bgToggle.checked = localStorage.getItem(BG_MODE_KEY) === 'true';
     document.getElementById('top-bar-toggle').checked = localStorage.getItem('sillytavern_top_bar_enabled') !== 'false'; // Default true
+    notifyToggle.checked = localStorage.getItem(REPLY_NOTIFY_KEY) === 'true';
     checkBatteryOptimization();
 
     toggleAuthFields();
@@ -146,10 +150,12 @@ function saveSettings() {
 
     localStorage.setItem(BG_MODE_KEY, bgToggle.checked);
     localStorage.setItem('sillytavern_top_bar_enabled', document.getElementById('top-bar-toggle').checked);
+    localStorage.setItem(REPLY_NOTIFY_KEY, notifyToggle.checked);
 
     syncAuthToNative();
     syncBackgroundToNative();
     syncUIToNative(); // New sync call
+    syncNotificationsToNative();
     updateDisplay(url);
     hideSettings();
 }
@@ -165,6 +171,13 @@ function syncBackgroundToNative() {
     const enabled = localStorage.getItem(BG_MODE_KEY) === 'true';
     if (window.BackgroundBridge && window.BackgroundBridge.setBackgroundMode) {
         window.BackgroundBridge.setBackgroundMode(enabled);
+    }
+}
+
+function syncNotificationsToNative() {
+    const enabled = localStorage.getItem(REPLY_NOTIFY_KEY) === 'true';
+    if (window.NotificationBridge && window.NotificationBridge.setReplyNotifications) {
+        window.NotificationBridge.setReplyNotifications(enabled);
     }
 }
 

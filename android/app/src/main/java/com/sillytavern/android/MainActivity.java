@@ -1,6 +1,10 @@
 package com.sillytavern.android;
 
 import android.Manifest;
+import android.app.Notification;
+import android.app.NotificationChannel;
+import android.app.NotificationManager;
+import android.app.PendingIntent;
 import android.content.Context;
 import android.content.Intent;
 import android.content.SharedPreferences;
@@ -18,6 +22,8 @@ import android.webkit.WebChromeClient;
 import android.webkit.WebSettings;
 import android.webkit.WebView;
 import androidx.core.app.ActivityCompat;
+import androidx.core.app.NotificationCompat;
+import androidx.core.app.NotificationManagerCompat;
 import androidx.core.content.ContextCompat;
 import androidx.core.graphics.Insets;
 import androidx.core.view.ViewCompat;
@@ -54,10 +60,16 @@ public class MainActivity extends BridgeActivity {
     private LinearLayout topBar;
     private SeekBar zoomSlider;
     private int currentZoomProgress = 100; // Default 100%
+    private static final String KEY_REPLY_NOTIFICATIONS = "reply_notifications";
+    private static final String REPLY_CHANNEL_ID = "ReplyChannel";
+    private static final int REPLY_NOTIFICATION_ID = 2;
+
+    private volatile boolean inForeground = false;
 
     // Injected after every page load. Once the SillyTavern page is ready it
     // subscribes to ST's generation events and forwards them to GenerationBridge,
-    // so the CPU is only kept awake while a reply is actually being generated.
+    // so the CPU is only kept awake while a reply is actually being generated,
+    // and passes the finished reply to NotificationBridge.
     // Gives up after two minutes on pages that aren't SillyTavern.
     private static final String GENERATION_HOOK_JS =
             "(function(){" +
@@ -73,7 +85,13 @@ public class MainActivity extends BridgeActivity {
             "if(window.GenerationBridge)window.GenerationBridge.onGenerationStarted();" +
             "});" +
             "var done=function(){if(window.GenerationBridge)window.GenerationBridge.onGenerationEnded();};" +
-            "c.eventSource.on(e.GENERATION_ENDED,done);" +
+            "c.eventSource.on(e.GENERATION_ENDED,function(){" +
+            "done();" +
+            "try{" +
+            "var chat=ST.getContext().chat||[],m=chat[chat.length-1];" +
+            "if(m&&!m.is_user&&window.NotificationBridge)window.NotificationBridge.onReplyFinished(String(m.name||\"SillyTavern\"),String(m.mes||\"\"));" +
+            "}catch(err){}" +
+            "});" +
             "if(e.GENERATION_STOPPED)c.eventSource.on(e.GENERATION_STOPPED,done);" +
             "},1000);" +
             "})();";
@@ -275,6 +293,8 @@ public class MainActivity extends BridgeActivity {
     @Override
     public void onResume() {
         super.onResume();
+        inForeground = true;
+        NotificationManagerCompat.from(this).cancel(REPLY_NOTIFICATION_ID);
 
         // Get the WebView instance from Capacitor's Bridge
         WebView webView = this.getBridge().getWebView();
@@ -284,6 +304,7 @@ public class MainActivity extends BridgeActivity {
         webView.addJavascriptInterface(new BackgroundBridge(this), "BackgroundBridge");
         webView.addJavascriptInterface(new UIBridge(this), "UIBridge");
         webView.addJavascriptInterface(new GenerationBridge(this), "GenerationBridge");
+        webView.addJavascriptInterface(new NotificationBridge(this), "NotificationBridge");
 
         // Sync background service state. The keep-alive is only needed once the app
         // leaves the foreground, so it's started from onPause, not here.
@@ -370,6 +391,7 @@ public class MainActivity extends BridgeActivity {
     @Override
     public void onPause() {
         super.onPause();
+        inForeground = false;
         syncBackgroundService(true);
     }
 
@@ -459,6 +481,62 @@ public class MainActivity extends BridgeActivity {
                 Intent intent = new Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS);
                 intent.setData(Uri.parse("package:" + mContext.getPackageName()));
                 mContext.startActivity(intent);
+            }
+        }
+    }
+
+    public class NotificationBridge {
+        Context mContext;
+
+        NotificationBridge(Context c) {
+            mContext = c;
+        }
+
+        @JavascriptInterface
+        public void setReplyNotifications(boolean enabled) {
+            SharedPreferences prefs = mContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE);
+            boolean wasEnabled = prefs.getBoolean(KEY_REPLY_NOTIFICATIONS, false);
+            prefs.edit().putBoolean(KEY_REPLY_NOTIFICATIONS, enabled).apply();
+            if (enabled && !wasEnabled) {
+                requestNotificationPermissionIfNeeded();
+            }
+        }
+
+        @JavascriptInterface
+        public void onReplyFinished(String name, String message) {
+            // Only useful when the user isn't already looking at the chat.
+            if (inForeground) return;
+            SharedPreferences prefs = mContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE);
+            if (!prefs.getBoolean(KEY_REPLY_NOTIFICATIONS, false)) return;
+            NotificationManagerCompat manager = NotificationManagerCompat.from(mContext);
+            if (!manager.areNotificationsEnabled()) return;
+
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                manager.createNotificationChannel(new NotificationChannel(
+                        REPLY_CHANNEL_ID, "Finished replies", NotificationManager.IMPORTANCE_DEFAULT));
+            }
+
+            String text = message.replaceAll("\\s+", " ").trim();
+            if (text.length() > 300) text = text.substring(0, 300) + "…";
+
+            Intent openIntent = new Intent(mContext, MainActivity.class)
+                    .setFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP);
+            PendingIntent contentIntent = PendingIntent.getActivity(mContext, 0, openIntent,
+                    PendingIntent.FLAG_IMMUTABLE);
+
+            Notification notification = new NotificationCompat.Builder(mContext, REPLY_CHANNEL_ID)
+                    .setSmallIcon(android.R.drawable.ic_dialog_email)
+                    .setContentTitle(name + " replied")
+                    .setContentText(text)
+                    .setStyle(new NotificationCompat.BigTextStyle().bigText(text))
+                    .setContentIntent(contentIntent)
+                    .setAutoCancel(true)
+                    .setPriority(NotificationCompat.PRIORITY_DEFAULT)
+                    .build();
+            try {
+                manager.notify(REPLY_NOTIFICATION_ID, notification);
+            } catch (SecurityException e) {
+                // Permission revoked between the check and the post.
             }
         }
     }
