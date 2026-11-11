@@ -1,8 +1,10 @@
 package com.sillytavern.android;
 
+import android.Manifest;
 import android.content.Context;
 import android.content.Intent;
 import android.content.SharedPreferences;
+import android.content.pm.PackageManager;
 import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
@@ -15,6 +17,8 @@ import android.webkit.ValueCallback;
 import android.webkit.WebChromeClient;
 import android.webkit.WebSettings;
 import android.webkit.WebView;
+import androidx.core.app.ActivityCompat;
+import androidx.core.content.ContextCompat;
 import androidx.core.graphics.Insets;
 import androidx.core.view.ViewCompat;
 import androidx.core.view.WindowCompat;
@@ -37,6 +41,7 @@ import androidx.activity.OnBackPressedCallback;
 
 public class MainActivity extends BridgeActivity {
     private static final int FILE_CHOOSER_RESULT_CODE = 1;
+    private static final int NOTIFICATION_PERMISSION_REQUEST_CODE = 2;
     private ValueCallback<Uri[]> filePathCallback;
     private static final String PREFS_NAME = "SillyTavernPrefs";
     private static final String KEY_AUTH_USER = "auth_user";
@@ -49,6 +54,33 @@ public class MainActivity extends BridgeActivity {
     private LinearLayout topBar;
     private SeekBar zoomSlider;
     private int currentZoomProgress = 100; // Default 100%
+
+    // Injected after every page load. Wraps fetch and XMLHttpRequest to count the
+    // page's in-flight network requests and tells GenerationBridge when that count
+    // leaves or returns to zero, so the CPU is kept awake for exactly as long as
+    // SillyTavern is waiting on something: a reply, a summary, embeddings, image
+    // or audio generation, or saving the chat. A streamed response counts until
+    // its body has been fully read.
+    private static final String GENERATION_HOOK_JS =
+            "(function(){" +
+            "if(window.__stActivityHook)return;window.__stActivityHook=true;" +
+            "var n=0,B=function(){return window.GenerationBridge;};" +
+            "var inc=function(){if(++n===1&&B())B().setBusy(true);};" +
+            "var once=function(){var d=false;return function(){if(d)return;d=true;if(--n===0&&B())B().setBusy(false);};};" +
+            "var of=window.fetch;" +
+            "if(of)window.fetch=function(){" +
+            "inc();var done=once();" +
+            "return of.apply(this,arguments).then(function(r){" +
+            "try{var rd=r.clone().body.getReader();(function pump(){rd.read().then(function(x){if(x.done)done();else pump();},done);})();}catch(err){done();}" +
+            "return r;" +
+            "},function(err){done();throw err;});" +
+            "};" +
+            "var os=XMLHttpRequest.prototype.send;" +
+            "XMLHttpRequest.prototype.send=function(){" +
+            "inc();var done=once();this.addEventListener(\"loadend\",done);" +
+            "try{return os.apply(this,arguments);}catch(err){done();throw err;}" +
+            "};" +
+            "})();";
 
     private SharedPreferences getSafeSharedPreferences(Context context) {
         try {
@@ -255,9 +287,11 @@ public class MainActivity extends BridgeActivity {
         webView.addJavascriptInterface(new AuthBridge(this), "AuthBridge");
         webView.addJavascriptInterface(new BackgroundBridge(this), "BackgroundBridge");
         webView.addJavascriptInterface(new UIBridge(this), "UIBridge");
+        webView.addJavascriptInterface(new GenerationBridge(this), "GenerationBridge");
 
-        // Sync background service state
-        syncBackgroundService();
+        // Sync background service state. The keep-alive is only needed once the app
+        // leaves the foreground, so it's started from onPause, not here.
+        syncBackgroundService(false);
 
         // Enable Zoom Support
         WebSettings webSettings = webView.getSettings();
@@ -303,6 +337,8 @@ public class MainActivity extends BridgeActivity {
                                 "document.head.appendChild(style);";
 
                 view.evaluateJavascript(jsInjection, null);
+
+                view.evaluateJavascript(GENERATION_HOOK_JS, null);
             }
         });
 
@@ -335,11 +371,21 @@ public class MainActivity extends BridgeActivity {
         });
     }
 
-    private void syncBackgroundService() {
-        SharedPreferences prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE);
-        boolean enabled = prefs.getBoolean(KEY_BACKGROUND_MODE, false);
+    @Override
+    public void onPause() {
+        super.onPause();
+        syncBackgroundService(true);
+    }
+
+    private boolean isBackgroundModeEnabled() {
+        return getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+                .getBoolean(KEY_BACKGROUND_MODE, false);
+    }
+
+    private void syncBackgroundService(boolean startIfEnabled) {
         Intent serviceIntent = new Intent(this, KeepAliveService.class);
-        if (enabled) {
+        if (isBackgroundModeEnabled()) {
+            if (!startIfEnabled) return;
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
                 startForegroundService(serviceIntent);
             } else {
@@ -347,6 +393,36 @@ public class MainActivity extends BridgeActivity {
             }
         } else {
             stopService(serviceIntent);
+            GenerationWakeLock.releaseNow();
+        }
+    }
+
+    // Android 13+ hides the foreground-service notification (and its Stop action)
+    // unless POST_NOTIFICATIONS is granted, so ask for it when background mode is on.
+    private void requestNotificationPermissionIfNeeded() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) return;
+        if (ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS)
+                == PackageManager.PERMISSION_GRANTED) return;
+        // Called from the JavaScript bridge thread.
+        runOnUiThread(() -> ActivityCompat.requestPermissions(this,
+                new String[]{Manifest.permission.POST_NOTIFICATIONS},
+                NOTIFICATION_PERMISSION_REQUEST_CODE));
+    }
+
+    public class GenerationBridge {
+        Context mContext;
+
+        GenerationBridge(Context c) {
+            mContext = c;
+        }
+
+        @JavascriptInterface
+        public void setBusy(boolean busy) {
+            if (!busy) {
+                GenerationWakeLock.release();
+            } else if (isBackgroundModeEnabled()) {
+                GenerationWakeLock.acquire(mContext);
+            }
         }
     }
 
@@ -360,8 +436,13 @@ public class MainActivity extends BridgeActivity {
         @JavascriptInterface
         public void setBackgroundMode(boolean enabled) {
             SharedPreferences prefs = mContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE);
+            boolean wasEnabled = prefs.getBoolean(KEY_BACKGROUND_MODE, false);
             prefs.edit().putBoolean(KEY_BACKGROUND_MODE, enabled).apply();
-            syncBackgroundService();
+            // Only prompt when the user turns the toggle on, not on every launch.
+            if (enabled && !wasEnabled) {
+                requestNotificationPermissionIfNeeded();
+            }
+            syncBackgroundService(false);
         }
 
         @JavascriptInterface

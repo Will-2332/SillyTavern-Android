@@ -5,32 +5,39 @@ import android.app.NotificationChannel;
 import android.app.NotificationManager;
 import android.app.PendingIntent;
 import android.app.Service;
-import android.content.Context;
 import android.content.Intent;
 import android.os.Build;
 import android.os.IBinder;
-import android.os.PowerManager;
 import androidx.annotation.Nullable;
 import androidx.core.app.NotificationCompat;
+import androidx.core.app.ServiceCompat;
 
 public class KeepAliveService extends Service {
+    public static final String ACTION_STOP = "com.sillytavern.android.action.STOP_KEEP_ALIVE";
+
     private static final String CHANNEL_ID = "KeepAliveChannel";
     private static final int NOTIFICATION_ID = 1;
-    private PowerManager.WakeLock wakeLock;
 
     @Override
     public void onCreate() {
         super.onCreate();
         createNotificationChannel();
-        
-        PowerManager powerManager = (PowerManager) getSystemService(Context.POWER_SERVICE);
-        wakeLock = powerManager.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "SillyTavern::KeepAlive");
     }
 
     @Override
     public int onStartCommand(Intent intent, int flags, int startId) {
+        if (intent != null && ACTION_STOP.equals(intent.getAction())) {
+            ServiceCompat.stopForeground(this, ServiceCompat.STOP_FOREGROUND_REMOVE);
+            stopSelf();
+            return START_NOT_STICKY;
+        }
+
         Intent notificationIntent = new Intent(this, MainActivity.class);
-        PendingIntent pendingIntent = PendingIntent.getActivity(this, 0, notificationIntent, 
+        PendingIntent pendingIntent = PendingIntent.getActivity(this, 0, notificationIntent,
+                PendingIntent.FLAG_IMMUTABLE);
+
+        Intent stopIntent = new Intent(this, KeepAliveService.class).setAction(ACTION_STOP);
+        PendingIntent stopPendingIntent = PendingIntent.getService(this, 1, stopIntent,
                 PendingIntent.FLAG_IMMUTABLE);
 
         Notification notification = new NotificationCompat.Builder(this, CHANNEL_ID)
@@ -38,24 +45,21 @@ public class KeepAliveService extends Service {
                 .setContentText("Keeping connection alive in background")
                 .setSmallIcon(android.R.drawable.ic_menu_info_details)
                 .setContentIntent(pendingIntent)
+                .addAction(0, "Stop", stopPendingIntent)
                 .setPriority(NotificationCompat.PRIORITY_LOW)
                 .setOngoing(true)
                 .build();
 
+        // The service only keeps the process alive. The CPU is kept awake
+        // separately, and only while a reply is generating (GenerationWakeLock).
         startForeground(NOTIFICATION_ID, notification);
-        
-        if (!wakeLock.isHeld()) {
-            wakeLock.acquire();
-        }
 
         return START_STICKY;
     }
 
     @Override
     public void onDestroy() {
-        if (wakeLock.isHeld()) {
-            wakeLock.release();
-        }
+        GenerationWakeLock.releaseNow();
         super.onDestroy();
     }
 
