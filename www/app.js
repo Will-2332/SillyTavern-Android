@@ -206,6 +206,13 @@ function connect() {
     }
 }
 
+// Keep the focused field visible once the keyboard has resized the view
+document.addEventListener('focusin', (event) => {
+    if (event.target instanceof HTMLInputElement && event.target.type !== 'checkbox') {
+        setTimeout(() => event.target.scrollIntoView({ block: 'center', behavior: 'smooth' }), 300);
+    }
+});
+
 // Event Listeners
 settingsBtn.addEventListener('click', showSettings);
 cancelBtn.addEventListener('click', hideSettings);
