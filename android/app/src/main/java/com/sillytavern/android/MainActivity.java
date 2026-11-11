@@ -66,33 +66,47 @@ public class MainActivity extends BridgeActivity {
 
     private volatile boolean inForeground = false;
 
-    // Injected after every page load. Once the SillyTavern page is ready it
-    // subscribes to ST's generation events and forwards them to GenerationBridge,
-    // so the CPU is only kept awake while a reply is actually being generated,
-    // and passes the finished reply to NotificationBridge.
-    // Gives up after two minutes on pages that aren't SillyTavern.
+    // Injected after every page load. Wraps fetch and XMLHttpRequest to count the
+    // page's in-flight network requests and tells GenerationBridge when that count
+    // leaves or returns to zero, so the CPU is kept awake for exactly as long as
+    // SillyTavern is waiting on something: a reply, a summary, embeddings, image
+    // or audio generation, or saving the chat. A streamed response counts until
+    // its body has been fully read.
+    // Also forwards the finished reply to NotificationBridge on GENERATION_ENDED.
     private static final String GENERATION_HOOK_JS =
             "(function(){" +
-            "if(window.__stGenerationHook)return;window.__stGenerationHook=true;" +
+            "if(window.__stActivityHook)return;window.__stActivityHook=true;" +
+            "var n=0,B=function(){return window.GenerationBridge;};" +
+            "var inc=function(){if(++n===1&&B())B().setBusy(true);};" +
+            "var once=function(){var d=false;return function(){if(d)return;d=true;if(--n===0&&B())B().setBusy(false);};};" +
+            "var of=window.fetch;" +
+            "if(of)window.fetch=function(){" +
+            "inc();var done=once();" +
+            "return of.apply(this,arguments).then(function(r){" +
+            "try{var rd=r.clone().body.getReader();(function pump(){rd.read().then(function(x){if(x.done)done();else pump();},done);})();}catch(err){done();}" +
+            "return r;" +
+            "},function(err){done();throw err;});" +
+            "};" +
+            "var os=XMLHttpRequest.prototype.send;" +
+            "XMLHttpRequest.prototype.send=function(){" +
+            "inc();var done=once();this.addEventListener(\"loadend\",done);" +
+            "try{return os.apply(this,arguments);}catch(err){done();throw err;}" +
+            "};" +
+            "})();" +
+            "(function(){" +
+            "if(window.__stReplyHook)return;window.__stReplyHook=true;" +
             "var tries=0,t=setInterval(function(){" +
             "if(++tries>120){clearInterval(t);return;}" +
             "var ST=window.SillyTavern;if(!ST||!ST.getContext)return;" +
             "var c=ST.getContext(),e=c.event_types;" +
-            "if(!c.eventSource||!e||!e.GENERATION_STARTED||!e.GENERATION_ENDED)return;" +
+            "if(!c.eventSource||!e||!e.GENERATION_ENDED)return;" +
             "clearInterval(t);" +
-            "c.eventSource.on(e.GENERATION_STARTED,function(type,options,dryRun){" +
-            "if(dryRun)return;" +
-            "if(window.GenerationBridge)window.GenerationBridge.onGenerationStarted();" +
-            "});" +
-            "var done=function(){if(window.GenerationBridge)window.GenerationBridge.onGenerationEnded();};" +
             "c.eventSource.on(e.GENERATION_ENDED,function(){" +
-            "done();" +
             "try{" +
             "var chat=ST.getContext().chat||[],m=chat[chat.length-1];" +
             "if(m&&!m.is_user&&window.NotificationBridge)window.NotificationBridge.onReplyFinished(String(m.name||\"SillyTavern\"),String(m.mes||\"\"));" +
             "}catch(err){}" +
             "});" +
-            "if(e.GENERATION_STOPPED)c.eventSource.on(e.GENERATION_STOPPED,done);" +
             "},1000);" +
             "})();";
 
@@ -435,15 +449,12 @@ public class MainActivity extends BridgeActivity {
         }
 
         @JavascriptInterface
-        public void onGenerationStarted() {
-            if (isBackgroundModeEnabled()) {
+        public void setBusy(boolean busy) {
+            if (!busy) {
+                GenerationWakeLock.release();
+            } else if (isBackgroundModeEnabled()) {
                 GenerationWakeLock.acquire(mContext);
             }
-        }
-
-        @JavascriptInterface
-        public void onGenerationEnded() {
-            GenerationWakeLock.release();
         }
     }
 
