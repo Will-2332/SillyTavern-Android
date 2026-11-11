@@ -13,6 +13,7 @@ import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
 import android.os.PowerManager;
+import android.os.SystemClock;
 import android.provider.Settings;
 import android.webkit.HttpAuthHandler;
 import android.webkit.JavascriptInterface;
@@ -65,6 +66,10 @@ public class MainActivity extends BridgeActivity {
     private static final int REPLY_NOTIFICATION_ID = 2;
 
     private volatile boolean inForeground = false;
+    // Work shorter than this (status polls, saves) never triggers a notification.
+    private static final long LONG_WORK_MS = 5 * 1000L;
+    private volatile long busySince = 0;
+    private volatile long lastReplyNotificationAt = -1;
 
     // Injected after every page load. Wraps fetch and XMLHttpRequest to count the
     // page's in-flight network requests and tells GenerationBridge when that count
@@ -452,10 +457,21 @@ public class MainActivity extends BridgeActivity {
 
         @JavascriptInterface
         public void setBusy(boolean busy) {
-            if (!busy) {
-                GenerationWakeLock.release();
-            } else if (isBackgroundModeEnabled()) {
-                GenerationWakeLock.acquire(mContext);
+            if (busy) {
+                busySince = SystemClock.elapsedRealtime();
+                if (isBackgroundModeEnabled()) {
+                    GenerationWakeLock.acquire(mContext);
+                }
+                return;
+            }
+            GenerationWakeLock.release();
+            // Fallback for when SillyTavern's own event doesn't reach us (other
+            // kinds of generation, older versions): something that took a while
+            // has just finished. Skipped if a reply notification with a preview
+            // was already posted for this piece of work.
+            long now = SystemClock.elapsedRealtime();
+            if (now - busySince >= LONG_WORK_MS && lastReplyNotificationAt < busySince) {
+                postFinishedNotification("SillyTavern", "Generation finished", false);
             }
         }
     }
@@ -517,40 +533,61 @@ public class MainActivity extends BridgeActivity {
 
         @JavascriptInterface
         public void onReplyFinished(String name, String message) {
-            // Only useful when the user isn't already looking at the chat.
-            if (inForeground) return;
-            SharedPreferences prefs = mContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE);
-            if (!prefs.getBoolean(KEY_REPLY_NOTIFICATIONS, false)) return;
-            NotificationManagerCompat manager = NotificationManagerCompat.from(mContext);
-            if (!manager.areNotificationsEnabled()) return;
-
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                manager.createNotificationChannel(new NotificationChannel(
-                        REPLY_CHANNEL_ID, "Finished replies", NotificationManager.IMPORTANCE_DEFAULT));
-            }
-
             String text = message.replaceAll("\\s+", " ").trim();
             if (text.length() > 300) text = text.substring(0, 300) + "…";
-
-            Intent openIntent = new Intent(mContext, MainActivity.class)
-                    .setFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP);
-            PendingIntent contentIntent = PendingIntent.getActivity(mContext, 0, openIntent,
-                    PendingIntent.FLAG_IMMUTABLE);
-
-            Notification notification = new NotificationCompat.Builder(mContext, REPLY_CHANNEL_ID)
-                    .setSmallIcon(android.R.drawable.ic_dialog_email)
-                    .setContentTitle(name + " replied")
-                    .setContentText(text)
-                    .setStyle(new NotificationCompat.BigTextStyle().bigText(text))
-                    .setContentIntent(contentIntent)
-                    .setAutoCancel(true)
-                    .setPriority(NotificationCompat.PRIORITY_DEFAULT)
-                    .build();
-            try {
-                manager.notify(REPLY_NOTIFICATION_ID, notification);
-            } catch (SecurityException e) {
-                // Permission revoked between the check and the post.
+            if (postFinishedNotification(name + " replied", text, false)) {
+                lastReplyNotificationAt = SystemClock.elapsedRealtime();
             }
+        }
+
+        // Posts a notification straight away, even in the foreground, so the user
+        // can check that notifications from this app are allowed and visible.
+        @JavascriptInterface
+        public void sendTestNotification() {
+            requestNotificationPermissionIfNeeded();
+            postFinishedNotification("SillyTavern", "Test notification. Reply notifications will look like this.", true);
+        }
+    }
+
+    /**
+     * Posts the "finished" notification if the setting is on and the app is in
+     * the background (or always, when forced). Returns whether it was posted.
+     */
+    private boolean postFinishedNotification(String title, String text, boolean force) {
+        if (!force) {
+            // Only useful when the user isn't already looking at the chat.
+            if (inForeground) return false;
+            SharedPreferences prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE);
+            if (!prefs.getBoolean(KEY_REPLY_NOTIFICATIONS, false)) return false;
+        }
+        NotificationManagerCompat manager = NotificationManagerCompat.from(this);
+        if (!manager.areNotificationsEnabled()) return false;
+
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            manager.createNotificationChannel(new NotificationChannel(
+                    REPLY_CHANNEL_ID, "Finished replies", NotificationManager.IMPORTANCE_DEFAULT));
+        }
+
+        Intent openIntent = new Intent(this, MainActivity.class)
+                .setFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP);
+        PendingIntent contentIntent = PendingIntent.getActivity(this, 0, openIntent,
+                PendingIntent.FLAG_IMMUTABLE);
+
+        Notification notification = new NotificationCompat.Builder(this, REPLY_CHANNEL_ID)
+                .setSmallIcon(android.R.drawable.ic_dialog_email)
+                .setContentTitle(title)
+                .setContentText(text)
+                .setStyle(new NotificationCompat.BigTextStyle().bigText(text))
+                .setContentIntent(contentIntent)
+                .setAutoCancel(true)
+                .setPriority(NotificationCompat.PRIORITY_DEFAULT)
+                .build();
+        try {
+            manager.notify(REPLY_NOTIFICATION_ID, notification);
+            return true;
+        } catch (SecurityException e) {
+            // Permission revoked between the check and the post.
+            return false;
         }
     }
 

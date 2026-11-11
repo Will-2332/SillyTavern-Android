@@ -220,5 +220,10 @@ saveBtn.addEventListener('click', saveSettings);
 connectBtn.addEventListener('click', connect);
 authToggle.addEventListener('change', toggleAuthFields);
 batteryOptBtn.addEventListener('click', requestBatteryOptimization);
+document.getElementById('test-notify-btn').addEventListener('click', () => {
+    if (window.NotificationBridge && window.NotificationBridge.sendTestNotification) {
+        window.NotificationBridge.sendTestNotification();
+    }
+});
 
 init();
