@@ -127,6 +127,7 @@ public class MainActivity extends BridgeActivity {
 
         setupUserInterface();
         setupBackNavigation();
+        GenerationWakeLock.setListener(holding -> runOnUiThread(() -> setKeepPageRunning(holding)));
     }
 
     private void setupUserInterface() {
@@ -369,6 +370,68 @@ public class MainActivity extends BridgeActivity {
                 return true;
             }
         });
+    }
+
+    // --- Keeping the page running in the background ---
+    //
+    // About a minute after a WebView is hidden, Chromium freezes the page: timers
+    // stop and a streaming response is no longer read, so a reply that is still
+    // generating stalls until the app is reopened, wake lock or not. While work is
+    // in flight we therefore tell the WebView its window is still visible, and
+    // hand the real state back as soon as the work (plus grace period) is over,
+    // so an idle page is still allowed to freeze and costs no battery.
+    private final android.os.Handler pageHandler = new android.os.Handler(android.os.Looper.getMainLooper());
+    private boolean keepPageRunning = false;
+    private boolean activityStopped = false;
+    private final Runnable assertPageVisible = new Runnable() {
+        @Override
+        public void run() {
+            if (!keepPageRunning || !activityStopped) return;
+            WebView webView = getBridge() != null ? getBridge().getWebView() : null;
+            if (webView != null) {
+                webView.dispatchWindowVisibilityChanged(android.view.View.VISIBLE);
+            }
+            // Re-assert periodically in case the system reports the real state again.
+            pageHandler.postDelayed(this, 15 * 1000L);
+        }
+    };
+
+    private void setKeepPageRunning(boolean keep) {
+        keepPageRunning = keep;
+        pageHandler.removeCallbacks(assertPageVisible);
+        if (!activityStopped) return;
+        if (keep) {
+            assertPageVisible.run();
+        } else {
+            WebView webView = getBridge() != null ? getBridge().getWebView() : null;
+            if (webView != null) {
+                webView.dispatchWindowVisibilityChanged(android.view.View.GONE);
+            }
+        }
+    }
+
+    @Override
+    public void onStart() {
+        super.onStart();
+        activityStopped = false;
+        pageHandler.removeCallbacks(assertPageVisible);
+    }
+
+    @Override
+    public void onStop() {
+        super.onStop();
+        activityStopped = true;
+        // The system hides the window right around onStop; override that just after.
+        if (keepPageRunning) {
+            pageHandler.postDelayed(assertPageVisible, 500);
+        }
+    }
+
+    @Override
+    public void onDestroy() {
+        GenerationWakeLock.setListener(null);
+        pageHandler.removeCallbacks(assertPageVisible);
+        super.onDestroy();
     }
 
     @Override

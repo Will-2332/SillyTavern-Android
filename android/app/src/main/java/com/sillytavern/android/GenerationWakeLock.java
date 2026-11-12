@@ -27,9 +27,21 @@ final class GenerationWakeLock {
 
     private static final Handler handler = new Handler(Looper.getMainLooper());
     private static final Runnable releaseRunnable = GenerationWakeLock::releaseNow;
+    private static final Runnable capRunnable = GenerationWakeLock::releaseNow;
     private static PowerManager.WakeLock wakeLock;
     private static long busySince;
     private static boolean longWorkPending;
+    private static boolean holding;
+    private static Listener listener;
+
+    /** Told when a hold starts and ends, so the page can be kept running alongside the CPU. */
+    interface Listener {
+        void onHoldChanged(boolean holding);
+    }
+
+    static synchronized void setListener(Listener l) {
+        listener = l;
+    }
 
     private GenerationWakeLock() {}
 
@@ -43,11 +55,18 @@ final class GenerationWakeLock {
         }
         busySince = SystemClock.elapsedRealtime();
         wakeLock.acquire(MAX_HOLD_MS);
+        // The wake lock times out by itself; this ends the hold at the same moment.
+        handler.removeCallbacks(capRunnable);
+        handler.postDelayed(capRunnable, MAX_HOLD_MS);
+        if (!holding) {
+            holding = true;
+            if (listener != null) listener.onHoldChanged(true);
+        }
     }
 
     /** Releases the wake lock after a grace period that depends on how long the work took. */
     static synchronized void release() {
-        if (wakeLock == null || !wakeLock.isHeld()) return;
+        if (!holding) return;
         if (SystemClock.elapsedRealtime() - busySince >= LONG_WORK_THRESHOLD_MS) {
             longWorkPending = true;
         }
@@ -60,9 +79,14 @@ final class GenerationWakeLock {
     /** Releases the wake lock immediately, e.g. when background mode is turned off. */
     static synchronized void releaseNow() {
         handler.removeCallbacks(releaseRunnable);
+        handler.removeCallbacks(capRunnable);
         longWorkPending = false;
         if (wakeLock != null && wakeLock.isHeld()) {
             wakeLock.release();
+        }
+        if (holding) {
+            holding = false;
+            if (listener != null) listener.onHoldChanged(false);
         }
     }
 }
