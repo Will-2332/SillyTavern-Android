@@ -642,7 +642,7 @@ public class MainActivity extends BridgeActivity {
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             manager.createNotificationChannel(new NotificationChannel(
-                    REPLY_CHANNEL_ID, "Finished replies", NotificationManager.IMPORTANCE_DEFAULT));
+                    REPLY_CHANNEL_ID, "Finished replies", NotificationManager.IMPORTANCE_HIGH));
         }
 
         Intent openIntent = new Intent(this, MainActivity.class)
@@ -657,7 +657,9 @@ public class MainActivity extends BridgeActivity {
                 .setStyle(new NotificationCompat.BigTextStyle().bigText(text))
                 .setContentIntent(contentIntent)
                 .setAutoCancel(true)
-                .setPriority(NotificationCompat.PRIORITY_DEFAULT)
+                // High importance so it shows as a banner even when the phone is muted.
+                .setPriority(NotificationCompat.PRIORITY_HIGH)
+                .setCategory(NotificationCompat.CATEGORY_MESSAGE)
                 .build();
         try {
             manager.notify(REPLY_NOTIFICATION_ID, notification);
