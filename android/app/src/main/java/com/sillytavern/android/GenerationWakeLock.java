@@ -45,6 +45,10 @@ final class GenerationWakeLock {
 
     private GenerationWakeLock() {}
 
+    static synchronized boolean isHeld() {
+        return wakeLock != null && wakeLock.isHeld();
+    }
+
     static synchronized void acquire(Context context) {
         handler.removeCallbacks(releaseRunnable);
         if (wakeLock == null) {
@@ -59,6 +63,7 @@ final class GenerationWakeLock {
         handler.removeCallbacks(capRunnable);
         handler.postDelayed(capRunnable, MAX_HOLD_MS);
         if (!holding) {
+            DiagLog.add("hold START (wake lock + page)");
             holding = true;
             if (listener != null) listener.onHoldChanged(true);
         }
@@ -85,6 +90,7 @@ final class GenerationWakeLock {
             wakeLock.release();
         }
         if (holding) {
+            DiagLog.add("hold END");
             holding = false;
             if (listener != null) listener.onHoldChanged(false);
         }

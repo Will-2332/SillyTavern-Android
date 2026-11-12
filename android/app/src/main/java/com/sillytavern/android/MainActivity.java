@@ -77,7 +77,6 @@ public class MainActivity extends BridgeActivity {
     // SillyTavern is waiting on something: a reply, a summary, embeddings, image
     // or audio generation, or saving the chat. A streamed response counts until
     // its body has been fully read.
-    // Also forwards the finished reply to NotificationBridge on GENERATION_ENDED.
     private static final String GENERATION_HOOK_JS =
             "(function(){" +
             "if(window.__stActivityHook)return;window.__stActivityHook=true;" +
@@ -88,10 +87,13 @@ public class MainActivity extends BridgeActivity {
             "if(of)window.fetch=function(){" +
             "inc();var done=once();" +
             "return of.apply(this,arguments).then(function(r){" +
-            "try{var rd=r.clone().body.getReader();(function pump(){rd.read().then(function(x){if(x.done)done();else pump();},done);})();}catch(err){done();}" +
+            "try{var rd=r.clone().body.getReader(),last=Date.now(),t0=last,nb=0;(function pump(){rd.read().then(function(x){var now=Date.now();if(now-last>10000&&B()&&B().diag)B().diag(\"STREAM STALL \"+Math.round((now-last)/1000)+\"s between chunks (hidden=\"+document.hidden+\")\");last=now;if(x.done){if(now-t0>5000&&B()&&B().diag)B().diag(\"stream done: \"+Math.round((now-t0)/1000)+\"s, \"+nb+\" bytes\");done();}else{nb+=x.value?x.value.length:0;pump();}},done);})();}catch(err){done();}" +
             "return r;" +
             "},function(err){done();throw err;});" +
             "};" +
+            "if(B()&&B().diag)B().diag(\"net hook installed, fetch=\"+(!!of));" +
+            "var hb=Date.now();setInterval(function(){var now=Date.now();if(now-hb>15000&&B()&&B().diag)B().diag(\"JS TIMER GAP \"+Math.round((now-hb)/1000)+\"s (hidden=\"+document.hidden+\")\");hb=now;},5000);" +
+            "document.addEventListener(\"visibilitychange\",function(){if(B()&&B().diag)B().diag(\"page visibility: \"+(document.hidden?\"hidden\":\"visible\"));});" +
             "var os=XMLHttpRequest.prototype.send;" +
             "XMLHttpRequest.prototype.send=function(){" +
             "inc();var done=once();this.addEventListener(\"loadend\",done);" +
@@ -112,18 +114,20 @@ public class MainActivity extends BridgeActivity {
             "});" +
             "};" +
             "var tries=0,t=setInterval(function(){" +
-            "if(++tries>120){clearInterval(t);return;}" +
+            "if(++tries>120){clearInterval(t);if(window.GenerationBridge)window.GenerationBridge.diag(\"ST hook GAVE UP: SillyTavern=\"+(!!window.SillyTavern));return;}" +
             "var ST=window.SillyTavern;if(!ST||!ST.getContext)return;" +
             "var c=ST.getContext(),e=c.event_types||c.eventTypes;" +
             "if(!c.eventSource||!e)return;" +
             "var ev=e.CHARACTER_MESSAGE_RENDERED||e.GENERATION_ENDED;if(!ev)return;" +
             "clearInterval(t);" +
+            "if(window.GenerationBridge)window.GenerationBridge.diag(\"ST hook attached after \"+tries+\"s, event=\"+ev);" +
             "c.eventSource.on(ev,function(id,type){" +
             "try{" +
+            "if(window.GenerationBridge)window.GenerationBridge.diag(\"ST event id=\"+id+\" type=\"+type+\" hidden=\"+document.hidden);" +
             "if(type===\"first_message\")return;" +
             "var chat=ST.getContext().chat||[],m=chat[typeof id===\"number\"&&chat[id]?id:chat.length-1];" +
             "if(m&&!m.is_user&&!m.is_system&&window.NotificationBridge)window.NotificationBridge.onReplyFinished(String(m.name||\"SillyTavern\"),String(m.mes||\"\"));" +
-            "}catch(err){}" +
+            "}catch(err){if(window.GenerationBridge)window.GenerationBridge.diag(\"ST handler error: \"+err);}" +
             "});" +
             "},1000);" +
             "})();";
@@ -327,6 +331,7 @@ public class MainActivity extends BridgeActivity {
     public void onResume() {
         super.onResume();
         inForeground = true;
+        DiagLog.add("app -> foreground");
         NotificationManagerCompat.from(this).cancel(REPLY_NOTIFICATION_ID);
 
         // Get the WebView instance from Capacitor's Bridge
@@ -388,6 +393,7 @@ public class MainActivity extends BridgeActivity {
 
                 view.evaluateJavascript(jsInjection, null);
 
+                DiagLog.add("page finished: " + Uri.parse(url).getHost());
                 view.evaluateJavascript(GENERATION_HOOK_JS, null);
             }
         });
@@ -431,6 +437,7 @@ public class MainActivity extends BridgeActivity {
     // so an idle page is still allowed to freeze and costs no battery.
     private final android.os.Handler pageHandler = new android.os.Handler(android.os.Looper.getMainLooper());
     private boolean keepPageRunning = false;
+    private volatile long diagBusySince = 0;
     private boolean activityStopped = false;
     private final Runnable assertPageVisible = new Runnable() {
         @Override
@@ -439,6 +446,7 @@ public class MainActivity extends BridgeActivity {
             WebView webView = getBridge() != null ? getBridge().getWebView() : null;
             if (webView != null) {
                 webView.dispatchWindowVisibilityChanged(android.view.View.VISIBLE);
+                DiagLog.add("page forced VISIBLE (keep running)");
             }
             // Re-assert periodically in case the system reports the real state again.
             pageHandler.postDelayed(this, 15 * 1000L);
@@ -455,6 +463,7 @@ public class MainActivity extends BridgeActivity {
             WebView webView = getBridge() != null ? getBridge().getWebView() : null;
             if (webView != null) {
                 webView.dispatchWindowVisibilityChanged(android.view.View.GONE);
+                DiagLog.add("page visibility handed back (may freeze)");
             }
         }
     }
@@ -470,6 +479,7 @@ public class MainActivity extends BridgeActivity {
     public void onStop() {
         super.onStop();
         activityStopped = true;
+        DiagLog.add("activity stopped, keepPageRunning=" + keepPageRunning);
         // The system hides the window right around onStop; override that just after.
         if (keepPageRunning) {
             pageHandler.postDelayed(assertPageVisible, 500);
@@ -487,6 +497,7 @@ public class MainActivity extends BridgeActivity {
     public void onPause() {
         super.onPause();
         inForeground = false;
+        DiagLog.add("app -> background");
         syncBackgroundService(true);
     }
 
@@ -530,12 +541,33 @@ public class MainActivity extends BridgeActivity {
         }
 
         @JavascriptInterface
+        public void diag(String event) {
+            DiagLog.add("js: " + event);
+        }
+
+        @JavascriptInterface
+        public String getDiagnostics() {
+            return "background mode: " + isBackgroundModeEnabled()
+                    + "\nreply notifications: " + getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+                            .getBoolean(KEY_REPLY_NOTIFICATIONS, false)
+                    + "\nnotifications allowed: " + NotificationManagerCompat.from(MainActivity.this).areNotificationsEnabled()
+                    + "\nbattery optimization ignored: " + ((PowerManager) getSystemService(Context.POWER_SERVICE))
+                            .isIgnoringBatteryOptimizations(getPackageName())
+                    + "\nwake lock held now: " + GenerationWakeLock.isHeld()
+                    + "\n\n" + DiagLog.dump();
+        }
+
+        @JavascriptInterface
         public void setBusy(boolean busy) {
             if (busy) {
+                diagBusySince = SystemClock.elapsedRealtime();
                 if (isBackgroundModeEnabled()) {
                     GenerationWakeLock.acquire(mContext);
                 }
                 return;
+            }
+            if (SystemClock.elapsedRealtime() - diagBusySince >= 1000) {
+                DiagLog.add("requests done after " + (SystemClock.elapsedRealtime() - diagBusySince) / 1000.0 + "s (foreground=" + inForeground + ")");
             }
             GenerationWakeLock.release();
         }
@@ -598,6 +630,7 @@ public class MainActivity extends BridgeActivity {
 
         @JavascriptInterface
         public void onReplyFinished(String name, String message) {
+            DiagLog.add("ST reply event from " + name + " (" + message.length() + " chars, foreground=" + inForeground + ")");
             String text = message.replaceAll("\\s+", " ").trim();
             if (text.length() > 300) text = text.substring(0, 300) + "…";
             if (postFinishedNotification(name + " replied", text, false)) {
@@ -633,12 +666,12 @@ public class MainActivity extends BridgeActivity {
     private boolean postFinishedNotification(String title, String text, boolean force) {
         if (!force) {
             // Only useful when the user isn't already looking at the chat.
-            if (inForeground) return false;
+            if (inForeground) { DiagLog.add("notify skipped: app in foreground [" + title + "]"); return false; }
             SharedPreferences prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE);
-            if (!prefs.getBoolean(KEY_REPLY_NOTIFICATIONS, false)) return false;
+            if (!prefs.getBoolean(KEY_REPLY_NOTIFICATIONS, false)) { DiagLog.add("notify skipped: setting off"); return false; }
         }
         NotificationManagerCompat manager = NotificationManagerCompat.from(this);
-        if (!manager.areNotificationsEnabled()) return false;
+        if (!manager.areNotificationsEnabled()) { DiagLog.add("notify skipped: not allowed by Android"); return false; }
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             manager.createNotificationChannel(new NotificationChannel(
@@ -661,6 +694,7 @@ public class MainActivity extends BridgeActivity {
                 .build();
         try {
             manager.notify(REPLY_NOTIFICATION_ID, notification);
+            DiagLog.add("NOTIFIED: " + title);
             return true;
         } catch (SecurityException e) {
             // Permission revoked between the check and the post.
