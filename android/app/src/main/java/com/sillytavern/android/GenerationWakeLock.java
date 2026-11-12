@@ -42,8 +42,9 @@ final class GenerationWakeLock {
             wakeLock.setReferenceCounted(false);
         }
         busySince = SystemClock.elapsedRealtime();
+        boolean wasHeld = wakeLock.isHeld();
         wakeLock.acquire(MAX_HOLD_MS);
-        DiagLog.add("wake lock ACQUIRED");
+        if (!wasHeld) DiagLog.add("wake lock ACQUIRED");
     }
 
     /** Releases the wake lock after a grace period that depends on how long the work took. */
@@ -56,7 +57,6 @@ final class GenerationWakeLock {
         long grace = longWorkPending ? LONG_GRACE_MS : SHORT_GRACE_MS;
         handler.removeCallbacks(releaseRunnable);
         handler.postDelayed(releaseRunnable, grace);
-        DiagLog.add("wake lock release scheduled in " + grace / 1000 + "s");
     }
 
     /** Releases the wake lock immediately, e.g. when background mode is turned off. */

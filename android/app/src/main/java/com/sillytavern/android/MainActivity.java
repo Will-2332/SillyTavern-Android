@@ -87,11 +87,13 @@ public class MainActivity extends BridgeActivity {
             "if(of)window.fetch=function(){" +
             "inc();var done=once();" +
             "return of.apply(this,arguments).then(function(r){" +
-            "try{var rd=r.clone().body.getReader();(function pump(){rd.read().then(function(x){if(x.done)done();else pump();},done);})();}catch(err){done();}" +
+            "try{var rd=r.clone().body.getReader(),last=Date.now(),t0=last,nb=0;(function pump(){rd.read().then(function(x){var now=Date.now();if(now-last>10000&&B()&&B().diag)B().diag(\"STREAM STALL \"+Math.round((now-last)/1000)+\"s between chunks (hidden=\"+document.hidden+\")\");last=now;if(x.done){if(now-t0>5000&&B()&&B().diag)B().diag(\"stream done: \"+Math.round((now-t0)/1000)+\"s, \"+nb+\" bytes\");done();}else{nb+=x.value?x.value.length:0;pump();}},done);})();}catch(err){done();}" +
             "return r;" +
             "},function(err){done();throw err;});" +
             "};" +
             "if(B()&&B().diag)B().diag(\"net hook installed, fetch=\"+(!!of));" +
+            "var hb=Date.now();setInterval(function(){var now=Date.now();if(now-hb>15000&&B()&&B().diag)B().diag(\"JS TIMER GAP \"+Math.round((now-hb)/1000)+\"s (hidden=\"+document.hidden+\")\");hb=now;},5000);" +
+            "document.addEventListener(\"visibilitychange\",function(){if(B()&&B().diag)B().diag(\"page visibility: \"+(document.hidden?\"hidden\":\"visible\"));});" +
             "var os=XMLHttpRequest.prototype.send;" +
             "XMLHttpRequest.prototype.send=function(){" +
             "inc();var done=once();this.addEventListener(\"loadend\",done);" +
@@ -480,14 +482,15 @@ public class MainActivity extends BridgeActivity {
         @JavascriptInterface
         public void setBusy(boolean busy) {
             if (busy) {
-                DiagLog.add("busy (foreground=" + inForeground + ")");
                 busySince = SystemClock.elapsedRealtime();
                 if (isBackgroundModeEnabled()) {
                     GenerationWakeLock.acquire(mContext);
                 }
                 return;
             }
-            DiagLog.add("idle after " + (SystemClock.elapsedRealtime() - busySince) / 1000.0 + "s (foreground=" + inForeground + ")");
+            if (SystemClock.elapsedRealtime() - busySince >= 1000) {
+                DiagLog.add("requests done after " + (SystemClock.elapsedRealtime() - busySince) / 1000.0 + "s (foreground=" + inForeground + ")");
+            }
             GenerationWakeLock.release();
             // Fallback for when SillyTavern's own event doesn't reach us (other
             // kinds of generation, older versions): something that took a while
