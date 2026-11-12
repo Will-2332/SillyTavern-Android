@@ -226,4 +226,11 @@ document.getElementById('test-notify-btn').addEventListener('click', () => {
     }
 });
 
+document.getElementById('diag-btn').addEventListener('click', () => {
+    const out = document.getElementById('diag-out');
+    out.textContent = (window.GenerationBridge && window.GenerationBridge.getDiagnostics)
+        ? window.GenerationBridge.getDiagnostics() : 'GenerationBridge not available';
+    out.classList.remove('hidden');
+});
+
 init();
