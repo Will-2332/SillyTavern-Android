@@ -12,6 +12,8 @@ import android.content.pm.PackageManager;
 import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
+import android.os.Handler;
+import android.os.Looper;
 import android.os.PowerManager;
 import android.os.SystemClock;
 import android.provider.Settings;
@@ -66,9 +68,7 @@ public class MainActivity extends BridgeActivity {
     private static final int REPLY_NOTIFICATION_ID = 2;
 
     private volatile boolean inForeground = false;
-    // Work shorter than this (status polls, saves) never triggers a notification.
-    private static final long LONG_WORK_MS = 5 * 1000L;
-    private volatile long busySince = 0;
+    private final Handler fallbackHandler = new Handler(Looper.getMainLooper());
     private volatile long lastReplyNotificationAt = -1;
 
     // Injected after every page load. Wraps fetch and XMLHttpRequest to count the
@@ -77,7 +77,7 @@ public class MainActivity extends BridgeActivity {
     // SillyTavern is waiting on something: a reply, a summary, embeddings, image
     // or audio generation, or saving the chat. A streamed response counts until
     // its body has been fully read.
-    // Also forwards each finished character message to NotificationBridge.
+    // Also forwards the finished reply to NotificationBridge on GENERATION_ENDED.
     private static final String GENERATION_HOOK_JS =
             "(function(){" +
             "if(window.__stActivityHook)return;window.__stActivityHook=true;" +
@@ -100,6 +100,17 @@ public class MainActivity extends BridgeActivity {
             "})();" +
             "(function(){" +
             "if(window.__stReplyHook)return;window.__stReplyHook=true;" +
+            "var of2=window.fetch;" +
+            "if(of2)window.fetch=function(input){" +
+            "var u=\"\";try{u=String(input&&input.url?input.url:input);}catch(err){}" +
+            "var p=of2.apply(this,arguments);" +
+            "if(!/generat/i.test(u))return p;" +
+            "var t0=Date.now();" +
+            "return p.then(function(r){" +
+            "try{var rd=r.clone().body.getReader();(function pump(){rd.read().then(function(x){if(!x.done){pump();return;}if(Date.now()-t0>5000&&window.NotificationBridge)window.NotificationBridge.onGenerationRequestFinished();},function(){});})();}catch(err){}" +
+            "return r;" +
+            "});" +
+            "};" +
             "var tries=0,t=setInterval(function(){" +
             "if(++tries>120){clearInterval(t);return;}" +
             "var ST=window.SillyTavern;if(!ST||!ST.getContext)return;" +
@@ -521,21 +532,12 @@ public class MainActivity extends BridgeActivity {
         @JavascriptInterface
         public void setBusy(boolean busy) {
             if (busy) {
-                busySince = SystemClock.elapsedRealtime();
                 if (isBackgroundModeEnabled()) {
                     GenerationWakeLock.acquire(mContext);
                 }
                 return;
             }
             GenerationWakeLock.release();
-            // Fallback for when SillyTavern's own event doesn't reach us (other
-            // kinds of generation, older versions): something that took a while
-            // has just finished. Skipped if a reply notification with a preview
-            // was already posted for this piece of work.
-            long now = SystemClock.elapsedRealtime();
-            if (now - busySince >= LONG_WORK_MS && lastReplyNotificationAt < busySince) {
-                postFinishedNotification("SillyTavern", "Generation finished", false);
-            }
         }
     }
 
@@ -601,6 +603,18 @@ public class MainActivity extends BridgeActivity {
             if (postFinishedNotification(name + " replied", text, false)) {
                 lastReplyNotificationAt = SystemClock.elapsedRealtime();
             }
+        }
+
+        // Called when a long request to one of SillyTavern's generation endpoints
+        // (chat, image, voice) has completed. Posts a generic notification unless
+        // the reply event above covers it, which arrives within a second or so.
+        @JavascriptInterface
+        public void onGenerationRequestFinished() {
+            final long finishedAt = SystemClock.elapsedRealtime();
+            fallbackHandler.postDelayed(() -> {
+                if (lastReplyNotificationAt >= finishedAt - 5000) return;
+                postFinishedNotification("SillyTavern", "Generation finished", false);
+            }, 3000);
         }
 
         // Posts a notification straight away, even in the foreground, so the user
