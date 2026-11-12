@@ -27,11 +27,27 @@ final class GenerationWakeLock {
 
     private static final Handler handler = new Handler(Looper.getMainLooper());
     private static final Runnable releaseRunnable = GenerationWakeLock::releaseNow;
+    private static final Runnable capRunnable = GenerationWakeLock::releaseNow;
     private static PowerManager.WakeLock wakeLock;
     private static long busySince;
     private static boolean longWorkPending;
+    private static boolean holding;
+    private static Listener listener;
+
+    /** Told when a hold starts and ends, so the page can be kept running alongside the CPU. */
+    interface Listener {
+        void onHoldChanged(boolean holding);
+    }
+
+    static synchronized void setListener(Listener l) {
+        listener = l;
+    }
 
     private GenerationWakeLock() {}
+
+    static synchronized boolean isHeld() {
+        return wakeLock != null && wakeLock.isHeld();
+    }
 
     static synchronized void acquire(Context context) {
         handler.removeCallbacks(releaseRunnable);
@@ -42,14 +58,20 @@ final class GenerationWakeLock {
             wakeLock.setReferenceCounted(false);
         }
         busySince = SystemClock.elapsedRealtime();
-        boolean wasHeld = wakeLock.isHeld();
         wakeLock.acquire(MAX_HOLD_MS);
-        if (!wasHeld) DiagLog.add("wake lock ACQUIRED");
+        // The wake lock times out by itself; this ends the hold at the same moment.
+        handler.removeCallbacks(capRunnable);
+        handler.postDelayed(capRunnable, MAX_HOLD_MS);
+        if (!holding) {
+            DiagLog.add("hold START (wake lock + page)");
+            holding = true;
+            if (listener != null) listener.onHoldChanged(true);
+        }
     }
 
     /** Releases the wake lock after a grace period that depends on how long the work took. */
     static synchronized void release() {
-        if (wakeLock == null || !wakeLock.isHeld()) return;
+        if (!holding) return;
         if (SystemClock.elapsedRealtime() - busySince >= LONG_WORK_THRESHOLD_MS) {
             longWorkPending = true;
         }
@@ -62,14 +84,15 @@ final class GenerationWakeLock {
     /** Releases the wake lock immediately, e.g. when background mode is turned off. */
     static synchronized void releaseNow() {
         handler.removeCallbacks(releaseRunnable);
+        handler.removeCallbacks(capRunnable);
         longWorkPending = false;
         if (wakeLock != null && wakeLock.isHeld()) {
             wakeLock.release();
-            DiagLog.add("wake lock RELEASED");
         }
-    }
-
-    static synchronized boolean isHeld() {
-        return wakeLock != null && wakeLock.isHeld();
+        if (holding) {
+            DiagLog.add("hold END");
+            holding = false;
+            if (listener != null) listener.onHoldChanged(false);
+        }
     }
 }
